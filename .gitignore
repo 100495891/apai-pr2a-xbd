@@ -1,0 +1,32 @@
+# Datos (van en Drive, no en git)
+xBD_UC3M/
+xBD_UC3M_test_with_labels/
+*.tif
+*.png
+*.jpg
+*.json
+
+# Resultados de entrenamiento
+results/
+results_*/
+*.pth
+*.pth.tar
+*.csv
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
