@@ -33,6 +33,7 @@ import torch.nn as nn
 from torchvision.models.segmentation import deeplabv3_resnet101
 from torchvision.models.segmentation.deeplabv3 import DeepLabHead
 from torchvision.models.segmentation.fcn import FCNHead
+from torchvision.models import ResNet101_Weights
 
 
 def get_deeplabv3_xbd(
@@ -61,15 +62,15 @@ def get_deeplabv3_xbd(
     --------
     nn.Module — el modelo, todavía en CPU (mover con .to(device) fuera).
     """
-    # NOTA: usamos pretrained=True (compat con torchvision usado por M1).
-    # En torchvision >=0.13 emite DeprecationWarning; suprimimos para limpiar logs.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model = deeplabv3_resnet101(
-            pretrained=True,
-            progress=True,
-            aux_loss=aux_classifier,
-        )
+    # FIX compatibilidad torchvision >=0.13 (Python 3.12 en Colab):
+    # - weights=None        → no carga pesos COCO completos (evita conflicto aux_loss)
+    # - weights_backbone=.. → carga backbone ResNet-101 preentrenado en ImageNet
+    # Esto permite aux_classifier=True/False sin ValueError de aux_loss.
+    model = deeplabv3_resnet101(
+        weights=None,
+        weights_backbone=ResNet101_Weights.IMAGENET1K_V1,
+        aux_loss=aux_classifier,
+    )
 
     # ── Cabeza principal (ASPP + classifier) ──────────────────────────────────
     if aspp_rates is None:
