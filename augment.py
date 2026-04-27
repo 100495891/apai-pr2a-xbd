@@ -247,6 +247,72 @@ def denorm_image(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     return np.clip((tensor.cpu().numpy() * std + mean).transpose(1, 2, 0), 0, 1)
 
 
+def compute_sample_weights(dataset) -> "torch.DoubleTensor":
+    """
+    Calcula un peso por muestra para WeightedRandomSampler.
+
+    Estrategia: peso(muestra) = total / count(clase_más_grave_del_patch)
+
+    La "clase más grave" de un patch es el mayor índice de daño presente
+    entre sus edificios (4=destroyed > 3=major > 2=minor > 1=no-damage > 0=bg).
+    Así, los patches con edificios destruidos o con daño grave se muestrean
+    con mucha más frecuencia que los dominados por 'no-damage', compensando
+    el desequilibrio de clases sin eliminar ni duplicar ninguna muestra.
+
+    Parámetros
+    ----------
+    dataset : xBDDataset  (task='segmentation')
+
+    Devuelve
+    --------
+    torch.DoubleTensor de shape (len(dataset),) — listo para WeightedRandomSampler.
+
+    Uso típico
+    ----------
+        from augment import compute_sample_weights
+        from torch.utils.data import WeightedRandomSampler, DataLoader
+
+        weights  = compute_sample_weights(dataset_train)
+        sampler  = WeightedRandomSampler(weights, num_samples=len(weights),
+                                         replacement=True)
+        dl_train = DataLoader(dataset_train, batch_size=4,
+                              sampler=sampler, num_workers=2, pin_memory=True)
+    """
+    from collections import Counter
+
+    _IDX_TO_NAME = {
+        0: "background",
+        1: "no-damage",
+        2: "minor-damage",
+        3: "major-damage",
+        4: "destroyed",
+    }
+
+    # ── Clase dominante por muestra ──────────────────────────────────────────
+    # Se extrae de dataset.samples sin cargar ninguna imagen (muy rápido).
+    dominant = []
+    for s in dataset.samples:
+        labels = [b["label"] for b in s.get("buildings", []) if b["label"] > 0]
+        dominant.append(max(labels) if labels else 0)
+
+    # ── Frecuencia de cada clase dominante ───────────────────────────────────
+    counts = Counter(dominant)
+    total  = len(dominant)
+    # Peso de clase = total / nº de muestras con esa clase dominante
+    cls_w  = {cls: total / cnt for cls, cnt in counts.items()}
+
+    weights = torch.DoubleTensor([cls_w[d] for d in dominant])
+
+    print("[compute_sample_weights] Distribución de clases dominantes:")
+    print(f"  {'idx':<4} {'nombre':<16} {'muestras':>9} {'peso_clase':>12}")
+    print(f"  {'-'*45}")
+    for cls_id in sorted(counts):
+        name = _IDX_TO_NAME.get(cls_id, str(cls_id))
+        print(f"  {cls_id:<4} {name:<16} {counts[cls_id]:>9d} {cls_w[cls_id]:>12.2f}×")
+    print(f"  Total: {total} muestras")
+    return weights
+
+
 def visualize_augmentation(dataset, transform, n_samples=3, seed=42):
     """
     Muestra n_samples filas con 4 columnas:
