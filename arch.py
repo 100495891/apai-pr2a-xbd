@@ -68,7 +68,7 @@ def get_deeplabv3_xbd(
         model = deeplabv3_resnet101(
             pretrained=True,
             progress=True,
-            aux_loss=aux_classifier,
+            aux_loss=True,
         )
 
     # ── Cabeza principal (ASPP + classifier) ──────────────────────────────────
