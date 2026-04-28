@@ -420,3 +420,128 @@ class xBDDataset(Dataset):
     def label_post_from_sample(self, sample):
         labels = [b["label"] for b in sample["buildings"] if b["label"] >= 0]
         return max(labels) if labels else -1
+
+
+# ─── Balanceo de clases compartido (baseline) ─────────────────────────────────
+
+def _dominant_label(sample: dict) -> int:
+    """Clase de daño más grave presente en el patch (0 si solo background)."""
+    labels = [b["label"] for b in sample.get("buildings", []) if b["label"] > 0]
+    return max(labels) if labels else 0
+
+
+def balance_and_resplit(
+    dataset_train: xBDDataset,
+    dataset_val:   xBDDataset,
+    val_size:      float = 0.15,
+    random_state:  int   = 42,
+):
+    """
+    Combina train + val y re-divide con estratificación por clase dominante.
+
+    Replica exactamente la estrategia usada en el Proyecto 1 (celda 37):
+      - all_samples  = train.samples + val.samples
+      - split 85/15 estratificado por clase dominante del patch
+      - random_state = 42 para reproducibilidad
+
+    Parámetros
+    ----------
+    dataset_train : xBDDataset  (split=['train'])
+    dataset_val   : xBDDataset  (split=['val'])
+    val_size      : fracción de muestras para validación (default 0.15)
+    random_state  : semilla para reproducibilidad (default 42)
+
+    Devuelve
+    --------
+    (dataset_train_bal, dataset_val_bal) — dos xBDDataset con .samples actualizados.
+    La configuración (transform, stats, patch_size, task) se hereda del original.
+
+    Uso típico
+    ----------
+        from xbd_dataset import xBDDataset, IMAGENET_STATS, balance_and_resplit
+
+        ds_train = xBDDataset(data_dir, split=['train'], ...)
+        ds_val   = xBDDataset(data_dir, split=['val'],   ...)
+        ds_train, ds_val = balance_and_resplit(ds_train, ds_val)
+    """
+    import copy
+    import numpy as np
+    from sklearn.model_selection import train_test_split
+
+    # ── 1. Combinar muestras y calcular etiqueta dominante por muestra ────────
+    all_samples = list(dataset_train.samples) + list(dataset_val.samples)
+    all_labels  = np.array([_dominant_label(s) for s in all_samples])
+
+    # ── 2. Split estratificado (misma proporción de clases en train y val) ────
+    train_idx, val_idx = train_test_split(
+        np.arange(len(all_samples)),
+        test_size    = val_size,
+        stratify     = all_labels,
+        random_state = random_state,
+    )
+
+    # ── 3. Construir nuevos datasets reutilizando la configuración original ───
+    ds_train_bal = copy.copy(dataset_train)
+    ds_train_bal.samples = [all_samples[i] for i in train_idx]
+
+    ds_val_bal = copy.copy(dataset_val)
+    ds_val_bal.samples = [all_samples[i] for i in val_idx]
+
+    # ── 4. Resumen ────────────────────────────────────────────────────────────
+    _IDX_NAME = {0:"bg", 1:"no-dmg", 2:"minor", 3:"major", 4:"destr."}
+    from collections import Counter
+    orig_dist  = Counter(all_labels.tolist())
+    train_dist = Counter([_dominant_label(s) for s in ds_train_bal.samples])
+    val_dist   = Counter([_dominant_label(s) for s in ds_val_bal.samples])
+
+    print("[balance_and_resplit] Split estratificado 85/15 por clase dominante:")
+    print(f"  {'Clase':<10} {'Total':>7} {'Train':>7} {'Val':>7}")
+    print(f"  {'-'*34}")
+    for cls_id in sorted(orig_dist):
+        print(f"  {_IDX_NAME.get(cls_id, str(cls_id)):<10} "
+              f"{orig_dist[cls_id]:>7d} "
+              f"{train_dist.get(cls_id, 0):>7d} "
+              f"{val_dist.get(cls_id, 0):>7d}")
+    print(f"  {'TOTAL':<10} {len(all_samples):>7d} "
+          f"{len(ds_train_bal.samples):>7d} "
+          f"{len(ds_val_bal.samples):>7d}")
+
+    return ds_train_bal, ds_val_bal
+
+
+def get_class_weights(dataset: xBDDataset, num_classes: int = 5) -> "torch.Tensor":
+    """
+    Calcula pesos de clase = total / (num_classes × count_por_clase).
+
+    Replica la fórmula de P1 celda 41. Útil para CrossEntropy ponderado (M2)
+    y para WeightedRandomSampler (baseline compartido).
+
+    Parámetros
+    ----------
+    dataset     : xBDDataset  (tipicamente el de train)
+    num_classes : número de clases incluyendo background (default 5)
+
+    Devuelve
+    --------
+    torch.FloatTensor de shape (num_classes,) con los pesos por clase.
+    """
+    import numpy as np
+    from collections import Counter
+
+    # Contar clase dominante por muestra
+    counts_dict = Counter([_dominant_label(s) for s in dataset.samples])
+    total       = len(dataset.samples)
+
+    counts_arr  = np.array(
+        [counts_dict.get(i, 1) for i in range(num_classes)], dtype=np.float32
+    )
+    weights_np  = total / (num_classes * counts_arr)
+
+    print("[get_class_weights] Pesos de clase (P1 fórmula):")
+    _IDX_NAME = {0:"background", 1:"no-damage", 2:"minor-damage",
+                 3:"major-damage", 4:"destroyed"}
+    for i, (cnt, w) in enumerate(zip(counts_arr, weights_np)):
+        print(f"  idx={i} {_IDX_NAME.get(i,'?'):<16} "
+              f"muestras={int(cnt):>5d}  peso={w:.3f}")
+
+    return torch.tensor(weights_np, dtype=torch.float32)
