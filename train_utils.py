@@ -130,11 +130,12 @@ def train_model_xbd(
 
                     for name, metric in metrics.items():
                         if name == "jaccard_score":
+                            # labels FIJOS = todas las clases, así ji[i] siempre es la clase i
                             ji = metric(y_true_np.ravel(), y_pred_np.ravel(),
-                                        labels=np.unique(y_true_np), average=None)
-                            # Excluir background (idx 0) del mIoU
-                            batchsummary[f"{phase}_{name}"].append(
-                                np.mean(ji[1:]) if len(ji) > 1 else 0.0)
+                                        labels=list(range(num_classes)), average=None,
+                                        zero_division=0)
+                            # mIoU foreground = media de las 4 clases de daño (excluye background)
+                            batchsummary[f"{phase}_{name}"].append(np.mean(ji[1:]))
 
                     if phase == "Train":
                         loss.backward()
