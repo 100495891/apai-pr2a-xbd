@@ -1,6 +1,7 @@
 # Datos (van en Drive, no en git)
 xBD_UC3M/
 xBD_UC3M_test_with_labels/
+myVOC4/
 *.tif
 *.png
 *.jpg
