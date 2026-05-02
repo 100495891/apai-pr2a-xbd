@@ -4,7 +4,7 @@ augment.py — Data augmentation sincronizado para xBDDataset (Bloque M1).
 Contenido
 ---------
 - JointTransform     : transforma imagen + máscara de forma sincronizada
-- ABLATION_CONFIGS   : 4 configuraciones predefinidas para la ablación de M1
+- ABLATION_CONFIGS   : 5 configuraciones predefinidas para la ablación de M1
 - visualize_augmentation : utilidad para verificar visualmente que img+mask
                            se transforman de forma coherente
 
@@ -20,9 +20,11 @@ Uso típico
 
 Reglas de oro (M1)
 ------------------
-- Transforms ESPACIALES (flip, rotación) → se aplican IGUAL a imagen Y máscara.
+- Transforms ESPACIALES (flip, rotación, crop) → se aplican IGUAL a imagen Y máscara.
 - Transforms FOTOMÉTRICOS (brillo, contraste, blur) → SOLO a la imagen.
-- Rotación de máscara con NEAREST (preserva enteros 0-4); imágenes con BILINEAR.
+- Rotación/crop de máscara con NEAREST (preserva enteros 0-4); imágenes con BILINEAR.
+- Color jitter (brillo + contraste) se decide con UN SOLO random check para evitar
+  aplicar uno sin el otro y garantizar consistencia entre pre y post.
 """
 
 import random
@@ -48,10 +50,16 @@ class JointTransform:
     hflip_p          : prob. flip horizontal              (default 0.5)
     vflip_p          : prob. flip vertical                (default 0.5)
     rotation_degrees : rango rotación aleatoria en grados (default 0 = sin rotación)
-    color_jitter_p   : prob. de aplicar jitter brillo+contraste (default 0.0)
+    color_jitter_p   : prob. de aplicar jitter brillo+contraste juntos (default 0.0)
     brightness       : magnitud variación de brillo en [-b, +b]  (default 0.2)
     contrast         : magnitud variación de contraste en [1-c, 1+c] (default 0.2)
     blur_p           : prob. de aplicar Gaussian blur     (default 0.0)
+    crop_p           : prob. de aplicar RandomResizedCrop (default 0.0)
+                       Si >0, recorta un área aleatoria entre el 50%-100% de la
+                       imagen y la redimensiona al tamaño original. Sincronizado
+                       imagen+máscara. Útil para simular variaciones de escala y
+                       ayudar con clases minoritarias dispersas en la imagen.
+    crop_scale_min   : fracción mínima del área a recortar (default 0.5)
     """
 
     def __init__(
@@ -63,12 +71,16 @@ class JointTransform:
         brightness: float = 0.2,
         contrast: float = 0.2,
         blur_p: float = 0.0,
+        crop_p: float = 0.0,
+        crop_scale_min: float = 0.5,
     ):
         assert 0.0 <= hflip_p <= 1.0,        "hflip_p debe estar en [0,1]"
         assert 0.0 <= vflip_p <= 1.0,        "vflip_p debe estar en [0,1]"
         assert rotation_degrees >= 0,         "rotation_degrees debe ser >= 0"
         assert 0.0 <= color_jitter_p <= 1.0, "color_jitter_p debe estar en [0,1]"
         assert 0.0 <= blur_p <= 1.0,         "blur_p debe estar en [0,1]"
+        assert 0.0 <= crop_p <= 1.0,         "crop_p debe estar en [0,1]"
+        assert 0.0 < crop_scale_min <= 1.0,  "crop_scale_min debe estar en (0,1]"
 
         self.hflip_p          = hflip_p
         self.vflip_p          = vflip_p
@@ -77,11 +89,38 @@ class JointTransform:
         self.brightness       = brightness
         self.contrast         = contrast
         self.blur_p           = blur_p
+        self.crop_p           = crop_p
+        self.crop_scale_min   = crop_scale_min
+
+    def _random_crop_params(self, h: int, w: int):
+        """
+        Genera parámetros de crop aleatorio (top, left, crop_h, crop_w)
+        que cubren entre crop_scale_min² y 100% del área de la imagen.
+        La relación de aspecto varía entre 3/4 y 4/3.
+        """
+        area = h * w
+        for _ in range(10):  # hasta 10 intentos para encontrar crop válido
+            scale       = random.uniform(self.crop_scale_min, 1.0)
+            ratio       = random.uniform(3.0 / 4.0, 4.0 / 3.0)
+            crop_w = int(round((area * scale * ratio) ** 0.5))
+            crop_h = int(round((area * scale / ratio) ** 0.5))
+            if 0 < crop_w <= w and 0 < crop_h <= h:
+                top  = random.randint(0, h - crop_h)
+                left = random.randint(0, w - crop_w)
+                return top, left, crop_h, crop_w
+        # Fallback: crop central del 80%
+        crop_h = int(h * 0.8)
+        crop_w = int(w * 0.8)
+        top    = (h - crop_h) // 2
+        left   = (w - crop_w) // 2
+        return top, left, crop_h, crop_w
 
     def __call__(self, sample: dict) -> dict:
         img_post = sample["patch_post"]
         img_pre  = sample["patch_pre"]
         mask     = sample["mask_patch"]
+
+        _, H, W = img_post.shape
 
         # TF necesita (C, H, W) → canal ficticio para la máscara
         mask = mask.unsqueeze(0)
@@ -107,19 +146,27 @@ class JointTransform:
             mask     = TF.rotate(mask.float(), angle,
                                  interpolation=TF.InterpolationMode.NEAREST,  fill=0).long()
 
+        # RandomResizedCrop sincronizado (mismo crop para img y mask)
+        if self.crop_p > 0 and random.random() < self.crop_p:
+            top, left, crop_h, crop_w = self._random_crop_params(H, W)
+            img_post = TF.resized_crop(img_post, top, left, crop_h, crop_w, (H, W),
+                                       interpolation=TF.InterpolationMode.BILINEAR)
+            img_pre  = TF.resized_crop(img_pre,  top, left, crop_h, crop_w, (H, W),
+                                       interpolation=TF.InterpolationMode.BILINEAR)
+            mask     = TF.resized_crop(mask.float(), top, left, crop_h, crop_w, (H, W),
+                                       interpolation=TF.InterpolationMode.NEAREST).long()
+
         mask = mask.squeeze(0)
 
         # ── FOTOMÉTRICOS (SOLO imágenes, NUNCA la máscara) ────────────────────
+        # Un único random check para brillo + contraste: garantiza que se aplican
+        # ambos o ninguno (evita muestreo independiente que causaba inconsistencias).
 
         if random.random() < self.color_jitter_p:
             b = random.uniform(-self.brightness, self.brightness)
-            img_post = img_post + b
-            img_pre  = img_pre  + b
-
-        if random.random() < self.color_jitter_p:
             c = random.uniform(1.0 - self.contrast, 1.0 + self.contrast)
-            img_post = img_post * c
-            img_pre  = img_pre  * c
+            img_post = (img_post + b) * c
+            img_pre  = (img_pre  + b) * c
 
         if random.random() < self.blur_p:
             ks = random.choice([3, 5])
@@ -135,7 +182,8 @@ class JointTransform:
         return (
             f"JointTransform(hflip_p={self.hflip_p}, vflip_p={self.vflip_p}, "
             f"rotation_degrees={self.rotation_degrees}, "
-            f"color_jitter_p={self.color_jitter_p}, blur_p={self.blur_p})"
+            f"color_jitter_p={self.color_jitter_p}, blur_p={self.blur_p}, "
+            f"crop_p={self.crop_p}, crop_scale_min={self.crop_scale_min})"
         )
 
 
@@ -160,6 +208,14 @@ ABLATION_CONFIGS = {
             color_jitter_p=0.5, brightness=0.2, contrast=0.2, blur_p=0.3,
         ),
         "description": "Full Aug (Flips + Rot + Color + Blur)",
+    },
+    "aug_crop": {
+        "transform":   JointTransform(
+            hflip_p=0.5, vflip_p=0.5, rotation_degrees=15,
+            color_jitter_p=0.5, brightness=0.2, contrast=0.2, blur_p=0.3,
+            crop_p=0.5, crop_scale_min=0.5,
+        ),
+        "description": "Full Aug + RandomResizedCrop (escala 50-100%)",
     },
 }
 
@@ -191,6 +247,72 @@ def denorm_image(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     return np.clip((tensor.cpu().numpy() * std + mean).transpose(1, 2, 0), 0, 1)
 
 
+def compute_sample_weights(dataset) -> "torch.DoubleTensor":
+    """
+    Calcula un peso por muestra para WeightedRandomSampler.
+
+    Estrategia: peso(muestra) = total / count(clase_más_grave_del_patch)
+
+    La "clase más grave" de un patch es el mayor índice de daño presente
+    entre sus edificios (4=destroyed > 3=major > 2=minor > 1=no-damage > 0=bg).
+    Así, los patches con edificios destruidos o con daño grave se muestrean
+    con mucha más frecuencia que los dominados por 'no-damage', compensando
+    el desequilibrio de clases sin eliminar ni duplicar ninguna muestra.
+
+    Parámetros
+    ----------
+    dataset : xBDDataset  (task='segmentation')
+
+    Devuelve
+    --------
+    torch.DoubleTensor de shape (len(dataset),) — listo para WeightedRandomSampler.
+
+    Uso típico
+    ----------
+        from augment import compute_sample_weights
+        from torch.utils.data import WeightedRandomSampler, DataLoader
+
+        weights  = compute_sample_weights(dataset_train)
+        sampler  = WeightedRandomSampler(weights, num_samples=len(weights),
+                                         replacement=True)
+        dl_train = DataLoader(dataset_train, batch_size=4,
+                              sampler=sampler, num_workers=2, pin_memory=True)
+    """
+    from collections import Counter
+
+    _IDX_TO_NAME = {
+        0: "background",
+        1: "no-damage",
+        2: "minor-damage",
+        3: "major-damage",
+        4: "destroyed",
+    }
+
+    # ── Clase dominante por muestra ──────────────────────────────────────────
+    # Se extrae de dataset.samples sin cargar ninguna imagen (muy rápido).
+    dominant = []
+    for s in dataset.samples:
+        labels = [b["label"] for b in s.get("buildings", []) if b["label"] > 0]
+        dominant.append(max(labels) if labels else 0)
+
+    # ── Frecuencia de cada clase dominante ───────────────────────────────────
+    counts = Counter(dominant)
+    total  = len(dominant)
+    # Peso de clase = total / nº de muestras con esa clase dominante
+    cls_w  = {cls: total / cnt for cls, cnt in counts.items()}
+
+    weights = torch.DoubleTensor([cls_w[d] for d in dominant])
+
+    print("[compute_sample_weights] Distribución de clases dominantes:")
+    print(f"  {'idx':<4} {'nombre':<16} {'muestras':>9} {'peso_clase':>12}")
+    print(f"  {'-'*45}")
+    for cls_id in sorted(counts):
+        name = _IDX_TO_NAME.get(cls_id, str(cls_id))
+        print(f"  {cls_id:<4} {name:<16} {counts[cls_id]:>9d} {cls_w[cls_id]:>12.2f}×")
+    print(f"  Total: {total} muestras")
+    return weights
+
+
 def visualize_augmentation(dataset, transform, n_samples=3, seed=42):
     """
     Muestra n_samples filas con 4 columnas:
@@ -215,7 +337,6 @@ def visualize_augmentation(dataset, transform, n_samples=3, seed=42):
     for row in range(n_samples):
         idx = random.randrange(len(dataset))
         sample_orig = dataset[idx]
-        # Copia profunda para no contaminar al aplicar el transform
         sample_aug = {
             "patch_post": sample_orig["patch_post"].clone(),
             "patch_pre":  sample_orig["patch_pre"].clone(),

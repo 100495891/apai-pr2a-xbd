@@ -27,9 +27,9 @@ Sin ninguna corrección, el modelo aprende a predecir casi siempre "no-damage" y
 
 ## Qué hay implementado en `main` (baseline compartido)
 
-### Celda 60 del notebook — "BASELINE COMPARTIDO"
+### Celda "BASELINE COMPARTIDO" del notebook
 
-Esta celda reemplaza la creación simple de datasets y DataLoaders que había antes. Implementa exactamente la misma estrategia que usamos en el Proyecto 1 (células 37 y 41 de APAI_Proyecto1_Grupo08):
+Es la celda cuya primera línea de código es `from collections import Counter`. Reemplaza la creación simple de datasets y DataLoaders que había antes. Implementa exactamente la misma estrategia que usamos en el Proyecto 1 (células 37 y 41 de APAI_Proyecto1_Grupo08):
 
 #### Paso 1 — TEST separado (no se toca)
 ```python
@@ -82,41 +82,33 @@ Estas variables `dataloaders` y `dataset_train/val/test` son las que usa el rest
 
 ## Cómo verificar que funciona (antes de vuestros experimentos)
 
-Ejecutar la celda 60. Debéis ver un output parecido a este:
+Ejecutar la celda `from collections import Counter`. Debéis ver un output como este (los números exactos varían según el dataset completo):
 
 ```
 Cargando splits train+val combinados ...
-  Total muestras combinadas: XXXX
+  Total muestras combinadas: 1015
 
 Distribución ANTES del re-split:
-  background    :   XX  (X.X%)
-  no-damage     :  XXX  (84.X%)
-  minor-damage  :   XX  (X.X%)
-  major-damage  :   XX  (X.X%)
-  destroyed     :   XX  (X.X%)
+  no-damage      :   643  (63.3%)
+  minor-damage   :   171  (16.8%)
+  major-damage   :    86  (8.5%)
+  destroyed      :   115  (11.3%)
 
-Re-split estratificado 85/15 (random_state=42):
-  Train:  XXXX muestras
-    no-damage    :  XXX  (84.X%)   ← misma proporción que el total
-    minor-damage :   XX  (X.X%)
-    major-damage :   XX  (X.X%)
-    destroyed    :   XX  (X.X%)
-  Val:  XXXX muestras
-    (idem, proporciones conservadas)
+Re-split 85/15 → Train: 862  Val: 153
 
-Pesos de clase (WeightedRandomSampler):
-  no-damage     :  0.XXX×
-  minor-damage  :  X.XXX×          ← multiplicador > 1 = sobremuestreo
-  major-damage  :  X.XXX×
-  destroyed     :  XX.XX×          ← el más sobremuestreado
+Pesos WeightedRandomSampler:
+  no-damage      : 0.316×    ← submuestreado (clase dominante)
+  minor-damage   : 1.189×
+  major-damage   : 2.362×    ← sobremuestreado (clase escasa)
+  destroyed      : 1.759×
 
-✅ Datasets y DataLoaders balanceados listos:
-  Train : XXXX muestras → XX batches  (WRS activo)
-  Val   :  XXX muestras → XX batches
-  Test  :  XXX muestras → XX batches
+✅ DataLoaders listos:
+  Train :   862 muestras  (WRS activo)
+  Val   :   153 muestras
+  Test  :   287 muestras
 ```
 
-Si el IoU de major-damage y destroyed ya no es 0.000 tras entrenar con este baseline, está funcionando.
+Lo importante es que los pesos de no-damage sean < 1× y los de major-damage / destroyed sean > 1×. Si el IoU de major-damage y destroyed ya no es 0.000 tras entrenar, está funcionando.
 
 ---
 
@@ -254,7 +246,7 @@ model = get_deeplabv3_xbd(num_classes=5, aspp_rates=(6, 12, 18))
 
 ```
 main
-├── APAI_Pr2A_ImageSegmentation_2025_2026.ipynb  ← celda 60 = baseline balanceado
+├── APAI_Pr2A_ImageSegmentation_2025_2026.ipynb  ← celda "from collections import Counter" = baseline balanceado
 ├── xbd_dataset.py    ← DataLoader base (común, no tocar)
 ├── train_utils.py    ← train_model_xbd / test_segmentation_model_xbd (común)
 ├── augment.py        ← JointTransform, ABLATION_CONFIGS (M1)
@@ -267,10 +259,13 @@ feat/losses   ← rama de M2
 feat/arch     ← rama de M3
 ```
 
-**Flujo de trabajo recomendado:**
-1. Cada uno hace `git pull origin main` para tener el baseline actualizado
-2. Trabaja en tu rama (`feat/augment`, `feat/losses`, `feat/arch`)
-3. Cuando el baseline cambie, hacéis `git merge main` en vuestra rama
+**Flujo de trabajo para incorporar el baseline (ejecutar una sola vez):**
+```bash
+git checkout feat/losses    # o feat/arch según quién seas
+git merge main
+git push origin feat/losses
+```
+Si hay conflictos en el notebook, quedarse siempre con la versión que tiene `from collections import Counter` en la celda del baseline.
 
 ---
 
@@ -278,8 +273,8 @@ feat/arch     ← rama de M3
 
 | Qué | Dónde | Quién lo usa |
 |-----|-------|--------------|
-| Re-split estratificado 85/15 | Celda 60 del notebook | Todos |
-| WeightedRandomSampler en train | Celda 60 del notebook | Todos |
+| Re-split estratificado 85/15 | Celda `from collections import Counter` | Todos |
+| WeightedRandomSampler en train | Celda `from collections import Counter` | Todos |
 | JointTransform sincronizado | `augment.py` | M1 (Lara) |
 | Focal Loss / Dice Loss | `losses.py` | M2 |
 | aux_classifier / freeze_backbone | `arch.py` | M3 |
