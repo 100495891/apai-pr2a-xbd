@@ -43,46 +43,39 @@ def get_deeplabv3_xbd(
 ):
     """
     Construye DeepLabV3 con ResNet-101 preentrenado y cabezas adaptadas a xBD.
-
-    Parámetros
-    ----------
-    num_classes     : número de clases de salida (5 para xBD).
-    aux_classifier  : si True, añade FCNHead sobre layer3 del backbone.
-                      Su salida queda en outputs["aux"] y se usa en la pérdida
-                      auxiliar del bucle de entrenamiento (ver train_utils.py).
-    freeze_backbone : 'none'    → todo el backbone se entrena (default, baseline).
-                      'all'     → todo el backbone congelado.
-                      'partial' → solo layer4 descongelado (resto congelado).
-    aspp_rates      : tupla con tasas de dilatación del ASPP. None usa
-                      las del baseline (12, 24, 36). El enunciado sugiere
-                      probar (6, 12, 18).
-
-    Devuelve
-    --------
-    nn.Module — el modelo, todavía en CPU (mover con .to(device) fuera).
+    Soluciona el error de carga de pesos preentrenados forzando aux_loss=True.
     """
-    # NOTA: usamos pretrained=True (compat con torchvision usado por M1).
-    # En torchvision >=0.13 emite DeprecationWarning; suprimimos para limpiar logs.
+    # ── 1. Carga del modelo base ──────────────────────────────────────────────
+    # NOTA IMPORTANTE: Para cargar los pesos preentrenados de torchvision, 
+    # DEBEMOS poner aux_loss=True, ya que los pesos originales incluyen la rama auxiliar.
+    # Si ponemos False, torchvision lanza un ValueError.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = deeplabv3_resnet101(
             pretrained=True,
             progress=True,
-            aux_loss=True,
+            aux_loss=True,  # <--- Siempre True para evitar el ValueError
         )
 
-    # ── Cabeza principal (ASPP + classifier) ──────────────────────────────────
+    # ── 2. Cabeza principal (ASPP + classifier) ──────────────────────────────
+    # Sustituimos la cabeza de 21 clases (COCO) por la de 5 clases (xBD)
     if aspp_rates is None:
         model.classifier = DeepLabHead(2048, num_classes)
     else:
+        # Permite probar las tasas (6, 12, 18) sugeridas en el enunciado
         model.classifier = DeepLabHead(2048, num_classes, atrous_rates=aspp_rates)
 
-    # ── Cabeza auxiliar (FCNHead sobre layer3) ────────────────────────────────
+    # ── 3. Gestión de la cabeza auxiliar (M3) ─────────────────────────────────
     if aux_classifier:
+        # Si el experimento pide auxiliar, adaptamos la cabeza a nuestras 5 clases
         # ResNet-101 layer3 tiene 1024 canales de salida
         model.aux_classifier = FCNHead(1024, num_classes)
+    else:
+        # Si el experimento NO quiere auxiliar (Baseline), la eliminamos
+        # después de haber cargado los pesos preentrenados con éxito.
+        model.aux_classifier = None
 
-    # ── Congelado del backbone (M3) ───────────────────────────────────────────
+    # ── 4. Congelado del backbone (M3) ───────────────────────────────────────────
     if freeze_backbone == "none":
         pass
     elif freeze_backbone == "all":
@@ -103,14 +96,40 @@ def get_deeplabv3_xbd(
 
 # ─── Helper opcional para M3: variante ligera con ResNet-18 ───────────────────
 
-def get_deeplabv3_xbd_resnet18(num_classes: int = 5):
-    """
-    Variante ligera para entrenamientos rápidos de prueba (cell 75 del baseline).
-    M3 puede usarla para iterar más rápido en el barrido de hiperparámetros.
+from torchvision.models._utils import IntermediateLayerGetter
+from torchvision.models import resnet18
 
-    Pendiente de implementación detallada por M3 (requiere ensamblar manualmente
-    DeepLabV3 sobre torchvision.models.resnet18).
+def get_deeplabv3_xbd_resnet18(num_classes: int = 5, aux_classifier: bool = False):
     """
-    raise NotImplementedError(
-        "Variante ResNet-18 pendiente. M3 implementa esto si decide usarla."
-    )
+    Variante ligera con ResNet-18 para entrenamientos rápidos de prueba.
+    """
+    # 1. Cargamos el esqueleto básico y el backbone ligero
+    model = deeplabv3_resnet101(pretrained=True, progress=True)
+    backbone = resnet18(pretrained=True)
+    
+    # 2. Conectamos las capas del backbone
+    return_layers = {'layer4': 'out'}
+    if aux_classifier:
+        return_layers['layer3'] = 'aux'
+        
+    model.backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
+    
+    # 3. Mantenemos la resolución espacial (cambiando strides por dilations)
+    model.backbone.layer3[0].conv1.stride = (1, 1)
+    model.backbone.layer4[0].conv1.stride = (1, 1)
+    model.backbone.layer3[0].conv1.dilation = (2, 2)
+    model.backbone.layer3[0].conv1.padding = (2, 2)
+    model.backbone.layer4[0].conv1.dilation = (4, 4)
+    model.backbone.layer4[0].conv1.padding = (4, 4)
+    model.backbone.layer3[0].downsample[0].stride = (1, 1)
+    model.backbone.layer4[0].downsample[0].stride = (1, 1)
+
+    # 4. Adaptamos las cabezas a los canales de ResNet-18 (512 en vez de 2048)
+    model.classifier = DeepLabHead(512, num_classes)
+    
+    if aux_classifier:
+        model.aux_classifier = FCNHead(256, num_classes)
+    else:
+        model.aux_classifier = None
+        
+    return model
