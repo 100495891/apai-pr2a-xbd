@@ -66,9 +66,9 @@ def get_deeplabv3_xbd(
         # Truco de Transfer Learning: Copiamos los pesos originales a los nuevos canales
         with torch.no_grad():
             # Los primeros 3 canales (Post-desastre) reciben los pesos originales RGB
-            new_conv.weight[:, :3, :, :] = old_conv.weight
+            new_conv.weight[:, :3, :, :] = old_conv.weight / 2.0
             # Los siguientes 3 canales (Pre-desastre) reciben una copia de los mismos pesos
-            new_conv.weight[:, 3:, :, :] = old_conv.weight
+            new_conv.weight[:, 3:, :, :] = old_conv.weight / 2.0
             
         # Sustituimos la capa en el modelo
         model.backbone.conv1 = new_conv
@@ -131,8 +131,8 @@ def get_deeplabv3_xbd_resnet18(num_classes: int = 5, aux_classifier: bool = Fals
                              padding=old_conv.padding, 
                              bias=old_conv.bias is not None)
         with torch.no_grad():
-            new_conv.weight[:, :3, :, :] = old_conv.weight
-            new_conv.weight[:, 3:, :, :] = old_conv.weight
+            new_conv.weight[:, :3, :, :] = old_conv.weight / 2.0
+            new_conv.weight[:, 3:, :, :] = old_conv.weight / 2.0
         backbone.conv1 = new_conv
 
     # 2. Conectamos las capas del backbone
