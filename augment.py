@@ -1,30 +1,11 @@
 """
-augment.py — Data augmentation sincronizado para xBDDataset (Bloque M1).
+augment.py — Data augmentation sincronizado para xBDDataset.
 
-Contenido
----------
-- JointTransform     : transforma imagen + máscara de forma sincronizada
-- ABLATION_CONFIGS   : 5 configuraciones predefinidas para la ablación de M1
-- visualize_augmentation : utilidad para verificar visualmente que img+mask
-                           se transforman de forma coherente
-
-Uso típico
-----------
-    from augment import JointTransform, ABLATION_CONFIGS
-
-    dataset_train = xBDDataset(
-        data_dir=..., split=["train"], task="segmentation",
-        patch_size=img_size, stats=IMAGENET_STATS,
-        transform=JointTransform(hflip_p=0.5, vflip_p=0.5),
-    )
-
-Reglas de oro (M1)
-------------------
-- Transforms ESPACIALES (flip, rotación, crop) → se aplican IGUAL a imagen Y máscara.
-- Transforms FOTOMÉTRICOS (brillo, contraste, blur) → SOLO a la imagen.
-- Rotación/crop de máscara con NEAREST (preserva enteros 0-4); imágenes con BILINEAR.
-- Color jitter (brillo + contraste) se decide con UN SOLO random check para evitar
-  aplicar uno sin el otro y garantizar consistencia entre pre y post.
+Modulos exportados:
+- JointTransform         : transforma imagen y mascara de forma sincronizada.
+- ABLATION_CONFIGS       : 5 configuraciones para el estudio de ablacion.
+- visualize_augmentation : utilidad de verificacion visual imagen+mascara.
+- compute_sample_weights : pesos para WeightedRandomSampler.
 """
 
 import random
@@ -34,32 +15,25 @@ import torchvision.transforms.functional as TF
 import matplotlib.pyplot as plt
 
 
-# ─── JointTransform ───────────────────────────────────────────────────────────
-
 class JointTransform:
     """
-    Data augmentation sincronizado imagen + máscara para xBDDataset.
+    Augmentation sincronizado para imagen y mascara.
 
-    Recibe el dict de __getitem__ (tensores ya normalizados con ImageNet stats):
-      - 'patch_post' : Tensor (C, H, W) float32  — imagen post-desastre
-      - 'patch_pre'  : Tensor (C, H, W) float32  — imagen pre-desastre
-      - 'mask_patch' : Tensor (H, W)    int64    — etiquetas 0-4
+    Aplica las mismas transformaciones espaciales (flip, rotacion, crop) a imagen
+    y mascara, usando NEAREST para la mascara y BILINEAR para la imagen. Las
+    transformaciones fotometricas (brillo, contraste, blur) se aplican solo a la imagen.
 
-    Parámetros
+    Parametros
     ----------
-    hflip_p          : prob. flip horizontal              (default 0.5)
-    vflip_p          : prob. flip vertical                (default 0.5)
-    rotation_degrees : rango rotación aleatoria en grados (default 0 = sin rotación)
-    color_jitter_p   : prob. de aplicar jitter brillo+contraste juntos (default 0.0)
-    brightness       : magnitud variación de brillo en [-b, +b]  (default 0.2)
-    contrast         : magnitud variación de contraste en [1-c, 1+c] (default 0.2)
-    blur_p           : prob. de aplicar Gaussian blur     (default 0.0)
-    crop_p           : prob. de aplicar RandomResizedCrop (default 0.0)
-                       Si >0, recorta un área aleatoria entre el 50%-100% de la
-                       imagen y la redimensiona al tamaño original. Sincronizado
-                       imagen+máscara. Útil para simular variaciones de escala y
-                       ayudar con clases minoritarias dispersas en la imagen.
-    crop_scale_min   : fracción mínima del área a recortar (default 0.5)
+    hflip_p          : probabilidad de flip horizontal          (default 0.5)
+    vflip_p          : probabilidad de flip vertical            (default 0.5)
+    rotation_degrees : rango de rotacion aleatoria en grados    (default 0.0)
+    color_jitter_p   : probabilidad de aplicar brillo+contraste (default 0.0)
+    brightness       : magnitud de variacion de brillo          (default 0.2)
+    contrast         : magnitud de variacion de contraste       (default 0.2)
+    blur_p           : probabilidad de aplicar Gaussian blur    (default 0.0)
+    crop_p           : probabilidad de aplicar RandomResizedCrop (default 0.0)
+    crop_scale_min   : fraccion minima del area a recortar      (default 0.5)
     """
 
     def __init__(
@@ -93,11 +67,7 @@ class JointTransform:
         self.crop_scale_min   = crop_scale_min
 
     def _random_crop_params(self, h: int, w: int):
-        """
-        Genera parámetros de crop aleatorio (top, left, crop_h, crop_w)
-        que cubren entre crop_scale_min² y 100% del área de la imagen.
-        La relación de aspecto varía entre 3/4 y 4/3.
-        """
+        """Genera parametros de crop aleatorio (top, left, crop_h, crop_w)."""
         area = h * w
         for _ in range(10):  # hasta 10 intentos para encontrar crop válido
             scale       = random.uniform(self.crop_scale_min, 1.0)
@@ -122,10 +92,10 @@ class JointTransform:
 
         _, H, W = img_post.shape
 
-        # TF necesita (C, H, W) → canal ficticio para la máscara
+        # Canal ficticio para la mascara (TF requiere dimension de canal)
         mask = mask.unsqueeze(0)
 
-        # ── ESPACIALES (sincronizados imagen + máscara) ───────────────────────
+        # Transformaciones espaciales (sincronizadas imagen + mascara)
 
         if random.random() < self.hflip_p:
             img_post = TF.hflip(img_post)
@@ -146,7 +116,7 @@ class JointTransform:
             mask     = TF.rotate(mask.float(), angle,
                                  interpolation=TF.InterpolationMode.NEAREST,  fill=0).long()
 
-        # RandomResizedCrop sincronizado (mismo crop para img y mask)
+        # Crop aleatorio sincronizado (mismo recorte para imagen y mascara)
         if self.crop_p > 0 and random.random() < self.crop_p:
             top, left, crop_h, crop_w = self._random_crop_params(H, W)
             img_post = TF.resized_crop(img_post, top, left, crop_h, crop_w, (H, W),
@@ -158,9 +128,8 @@ class JointTransform:
 
         mask = mask.squeeze(0)
 
-        # ── FOTOMÉTRICOS (SOLO imágenes, NUNCA la máscara) ────────────────────
-        # Un único random check para brillo + contraste: garantiza que se aplican
-        # ambos o ninguno (evita muestreo independiente que causaba inconsistencias).
+        # Transformaciones fotometricas (solo imagen, nunca la mascara)
+        # Un unico check para brillo y contraste garantiza que se aplican juntos o ninguno.
 
         if random.random() < self.color_jitter_p:
             b = random.uniform(-self.brightness, self.brightness)
@@ -187,7 +156,7 @@ class JointTransform:
         )
 
 
-# ─── Configuraciones de ablación M1 ───────────────────────────────────────────
+# Configuraciones de ablacion
 
 ABLATION_CONFIGS = {
     "aug_none": {
@@ -220,19 +189,19 @@ ABLATION_CONFIGS = {
 }
 
 
-# ─── Visualización antes/después ──────────────────────────────────────────────
+# Utilidades de visualizacion
 
 CLASS_COLORS = {
-    0: (0.0,  0.0,  0.0),   # background    → negro
-    1: (0.2,  0.8,  0.2),   # no-damage     → verde
-    2: (1.0,  0.85, 0.0),   # minor-damage  → amarillo
-    3: (1.0,  0.4,  0.0),   # major-damage  → naranja
-    4: (0.8,  0.0,  0.0),   # destroyed     → rojo
+    0: (0.0,  0.0,  0.0),   # background   (negro)
+    1: (0.2,  0.8,  0.2),   # no-damage    (verde)
+    2: (1.0,  0.85, 0.0),   # minor-damage (amarillo)
+    3: (1.0,  0.4,  0.0),   # major-damage (naranja)
+    4: (0.8,  0.0,  0.0),   # destroyed    (rojo)
 }
 
 
 def mask_to_rgb(mask_tensor):
-    """Convierte máscara (H,W) int64 → imagen RGB (H,W,3) para visualización."""
+    """Convierte una mascara (H,W) int64 a imagen RGB (H,W,3) para visualizacion."""
     mask_np = mask_tensor.cpu().numpy()
     rgb = np.zeros((*mask_np.shape, 3), dtype=np.float32)
     for cls_idx, color in CLASS_COLORS.items():
@@ -241,7 +210,7 @@ def mask_to_rgb(mask_tensor):
 
 
 def denorm_image(tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
-    """Desnormaliza tensor ImageNet (C,H,W) → numpy (H,W,3) en [0,1]."""
+    """Desnormaliza un tensor ImageNet (C,H,W) a numpy (H,W,3) en rango [0,1]."""
     mean = np.array(mean).reshape(3, 1, 1)
     std  = np.array(std).reshape(3, 1, 1)
     return np.clip((tensor.cpu().numpy() * std + mean).transpose(1, 2, 0), 0, 1)
@@ -251,32 +220,9 @@ def compute_sample_weights(dataset) -> "torch.DoubleTensor":
     """
     Calcula un peso por muestra para WeightedRandomSampler.
 
-    Estrategia: peso(muestra) = total / count(clase_más_grave_del_patch)
-
-    La "clase más grave" de un patch es el mayor índice de daño presente
-    entre sus edificios (4=destroyed > 3=major > 2=minor > 1=no-damage > 0=bg).
-    Así, los patches con edificios destruidos o con daño grave se muestrean
-    con mucha más frecuencia que los dominados por 'no-damage', compensando
-    el desequilibrio de clases sin eliminar ni duplicar ninguna muestra.
-
-    Parámetros
-    ----------
-    dataset : xBDDataset  (task='segmentation')
-
-    Devuelve
-    --------
-    torch.DoubleTensor de shape (len(dataset),) — listo para WeightedRandomSampler.
-
-    Uso típico
-    ----------
-        from augment import compute_sample_weights
-        from torch.utils.data import WeightedRandomSampler, DataLoader
-
-        weights  = compute_sample_weights(dataset_train)
-        sampler  = WeightedRandomSampler(weights, num_samples=len(weights),
-                                         replacement=True)
-        dl_train = DataLoader(dataset_train, batch_size=4,
-                              sampler=sampler, num_workers=2, pin_memory=True)
+    El peso de cada muestra es inversamente proporcional a la frecuencia de su
+    clase dominante (el mayor nivel de dano presente en el patch). Devuelve un
+    DoubleTensor de shape (len(dataset),) listo para WeightedRandomSampler.
     """
     from collections import Counter
 
@@ -288,17 +234,15 @@ def compute_sample_weights(dataset) -> "torch.DoubleTensor":
         4: "destroyed",
     }
 
-    # ── Clase dominante por muestra ──────────────────────────────────────────
-    # Se extrae de dataset.samples sin cargar ninguna imagen (muy rápido).
+    # Clase dominante por muestra (sin cargar imagenes)
     dominant = []
     for s in dataset.samples:
         labels = [b["label"] for b in s.get("buildings", []) if b["label"] > 0]
         dominant.append(max(labels) if labels else 0)
 
-    # ── Frecuencia de cada clase dominante ───────────────────────────────────
+    # Frecuencia de cada clase dominante y calculo de pesos
     counts = Counter(dominant)
     total  = len(dominant)
-    # Peso de clase = total / nº de muestras con esa clase dominante
     cls_w  = {cls: total / cnt for cls, cnt in counts.items()}
 
     weights = torch.DoubleTensor([cls_w[d] for d in dominant])
@@ -308,19 +252,16 @@ def compute_sample_weights(dataset) -> "torch.DoubleTensor":
     print(f"  {'-'*45}")
     for cls_id in sorted(counts):
         name = _IDX_TO_NAME.get(cls_id, str(cls_id))
-        print(f"  {cls_id:<4} {name:<16} {counts[cls_id]:>9d} {cls_w[cls_id]:>12.2f}×")
+        print(f"  {cls_id:<4} {name:<16} {counts[cls_id]:>9d} {cls_w[cls_id]:>12.2f}x")
     print(f"  Total: {total} muestras")
     return weights
 
 
 def visualize_augmentation(dataset, transform, n_samples=3, seed=42):
     """
-    Muestra n_samples filas con 4 columnas:
-      col 0: imagen post-desastre original
-      col 1: imagen post-desastre aumentada
-      col 2: máscara original
-      col 3: máscara aumentada
-    Las cols 0-1 y 2-3 deben tener la misma transformación espacial.
+    Muestra n_samples filas con 4 columnas: imagen original, imagen aumentada,
+    mascara original y mascara aumentada. Permite verificar la coherencia espacial
+    entre imagen y mascara tras aplicar el transform.
     """
     random.seed(seed)
     torch.manual_seed(seed)
