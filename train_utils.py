@@ -111,7 +111,11 @@ def train_model_xbd(
             model.apply(set_bn_eval)
 
             for sample in tqdm(dataloaders[phase], desc=f"  {phase}"):
-                inputs = sample["patch_post"].to(device)
+                img_post = sample["patch_post"].to(device)
+                img_pre  = sample["patch_pre"].to(device)
+                
+                # Concatenamos [B, 3, H, W] y [B, 3, H, W] -> [B, 6, H, W]
+                inputs = torch.cat([img_post, img_pre], dim=1)
                 masks  = sample["mask_patch"].to(device)
 
                 optimizer.zero_grad()
@@ -214,7 +218,9 @@ def test_segmentation_model_xbd(
         model.eval()
         for sample in tqdm(dataloaders["Test"], desc="Evaluando"):
             with torch.no_grad():
-                inputs = sample["patch_post"].to(device)
+                img_post = sample["patch_post"].to(device)
+                img_pre  = sample["patch_pre"].to(device)
+                inputs = torch.cat([img_post, img_pre], dim=1)
                 masks  = sample["mask_patch"].to(device)
 
                 y_prob    = torch.nn.functional.softmax(model(inputs)["out"], dim=1)
@@ -245,7 +251,7 @@ def test_segmentation_model_xbd(
                 if SAVE_OPT:
                     fig, axes = plt.subplots(1, 3, figsize=(15, 5),
                                              constrained_layout=True)
-                    axes[0].imshow(_denorm(inputs[j], stats))
+                    axes[0].imshow(_denorm(img_post[j], stats))
                     axes[0].set_title("Post-desastre (entrada)", fontsize=12)
                     axes[0].axis("off")
                     axes[1].imshow(true_j, cmap=custom_cmap, norm=custom_norm,
