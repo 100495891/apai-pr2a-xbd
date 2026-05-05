@@ -40,22 +40,38 @@ def get_deeplabv3_xbd(
     aux_classifier: bool = False,
     freeze_backbone: str = "none",
     aspp_rates=None,
+    in_channels: int = 6  # <-- NUEVO: Añade este parámetro
 ):
-    """
-    Construye DeepLabV3 con ResNet-101 preentrenado y cabezas adaptadas a xBD.
-    Soluciona el error de carga de pesos preentrenados forzando aux_loss=True.
-    """
-    # ── 1. Carga del modelo base ──────────────────────────────────────────────
-    # NOTA IMPORTANTE: Para cargar los pesos preentrenados de torchvision, 
-    # DEBEMOS poner aux_loss=True, ya que los pesos originales incluyen la rama auxiliar.
-    # Si ponemos False, torchvision lanza un ValueError.
+    # 1. Carga del modelo base
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = deeplabv3_resnet101(
             pretrained=True,
             progress=True,
-            aux_loss=True,  # <--- Siempre True para evitar el ValueError
+            aux_loss=True,  
         )
+
+    # --- NUEVO: ADAPTACIÓN PARA 6 CANALES ---
+    if in_channels != 3:
+        # Extraemos la primera convolución original
+        old_conv = model.backbone.conv1
+        
+        # Creamos una nueva con 6 canales de entrada
+        new_conv = nn.Conv2d(in_channels, old_conv.out_channels, 
+                             kernel_size=old_conv.kernel_size, 
+                             stride=old_conv.stride, 
+                             padding=old_conv.padding, 
+                             bias=old_conv.bias is not None)
+        
+        # Truco de Transfer Learning: Copiamos los pesos originales a los nuevos canales
+        with torch.no_grad():
+            # Los primeros 3 canales (Post-desastre) reciben los pesos originales RGB
+            new_conv.weight[:, :3, :, :] = old_conv.weight
+            # Los siguientes 3 canales (Pre-desastre) reciben una copia de los mismos pesos
+            new_conv.weight[:, 3:, :, :] = old_conv.weight
+            
+        # Sustituimos la capa en el modelo
+        model.backbone.conv1 = new_conv
 
     # ── 2. Cabeza principal (ASPP + classifier) ──────────────────────────────
     # Sustituimos la cabeza de 21 clases (COCO) por la de 5 clases (xBD)
@@ -99,7 +115,7 @@ def get_deeplabv3_xbd(
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models import resnet18
 
-def get_deeplabv3_xbd_resnet18(num_classes: int = 5, aux_classifier: bool = False):
+def get_deeplabv3_xbd_resnet18(num_classes: int = 5, aux_classifier: bool = False, in_channels: int = 6):
     """
     Variante ligera con ResNet-18 para entrenamientos rápidos de prueba.
     """
@@ -107,6 +123,18 @@ def get_deeplabv3_xbd_resnet18(num_classes: int = 5, aux_classifier: bool = Fals
     model = deeplabv3_resnet101(pretrained=True, progress=True)
     backbone = resnet18(pretrained=True)
     
+    if in_channels != 3:
+        old_conv = backbone.conv1
+        new_conv = nn.Conv2d(in_channels, old_conv.out_channels, 
+                             kernel_size=old_conv.kernel_size, 
+                             stride=old_conv.stride, 
+                             padding=old_conv.padding, 
+                             bias=old_conv.bias is not None)
+        with torch.no_grad():
+            new_conv.weight[:, :3, :, :] = old_conv.weight
+            new_conv.weight[:, 3:, :, :] = old_conv.weight
+        backbone.conv1 = new_conv
+
     # 2. Conectamos las capas del backbone
     return_layers = {'layer4': 'out'}
     if aux_classifier:
